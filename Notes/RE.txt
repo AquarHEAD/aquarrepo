@@ -1,0 +1,284 @@
+cli
+sti
+
+int 8h 时间中断
+
+mov ah, 31h
+int 21h
+
+CMOS
+70h 地址端口
+71h 数据端口
+
+mov al, 4
+out 70h, al ;表示要访问CMOS的4号地址单元
+in al, 71h ;读取地址单元
+
+mov al, 0
+out 70h, al ;表示要访问CMOS的0号地址单元
+mov al, 12h
+out 71h, al ;把12h写入地址单元
+
+CMOS中用BCD码存储时间
+
+C: getvect() setvect() keep():驻留
+
+int 9h 键盘中断
+
+在TC里:
+int key;
+key = bioskey(1); -> 实际是int 16h调用的0号功能
+if(key != 0){
+key = bioskey(0); ->实际是int 16h调用的1号功能
+}
+
+与键盘硬中断9h不同
+
+int 1h单步中断程序设计:
+
+int 1h称为单步中断, 是一个硬件中断.
+产生int 1h的条件:
+标志寄存器中的TF = 1, 其中TF位是FL的第八位. 当执行某条指令前, TF = 1, 则执行该条指令后, 自动产生int 1h中断.
+FL只能用popf指令修改
+让TF = 1的指令如下:
+pushf
+pop ax
+or ax, 0100h
+push ax
+popf
+
+int 1h产生的时候, CPU会向堆栈中push3个内容, FL, 下条指令的CS, IP
+int 21h的机器码: CD, 21 (只有int 3h(breakpoint)是一个字节:CC)
+执行中断时TF会自动清理为0
+
+一个计算int 21h产生次数的程序
+
+code segment
+assume cs:code, ds:code
+main:
+	jmp begin
+old1h dw 0, 0
+count db 0
+begin:
+	push cs
+	pop ds
+	xor ax, ax
+	mov es, ax
+	mov bx, 4
+	push es:[bx]
+	pop old1h[0]
+	push es:[bx+2]
+	pop old1h[2]
+	mov word ptr es:[bx], offset int1h
+	mov word ptr es:[bx+2], cs
+	pushf
+	pop ax
+	or as, 0100h
+	push ax
+	popf
+	
+first:
+	nop ;不加密
+	mov cx, 5
+next:
+	mov ah, 2
+	mov dl, 'A'
+	int 21h
+	nop ;这个不加密 注意中断返回后不产生中断, 或者在int1h里面模拟执行int 21h
+	loop next
+	pushf
+	pop ax
+	and ax, 1011h
+	push ax
+	popf
+	nop
+	
+	push old1h[0]
+	pop es:[bx]
+	push old1h[2]
+	pop es:[bx+2]
+	mov ah, 2
+	mov dl, count
+	add dl, '0'
+	int 21h
+	mov ah 4ch
+	int 21h
+	
+int1h:
+	push bp
+	push bx
+	push es
+	mov bp, sp; 中断产生的时候, 堆栈里面有返回地址
+	mov bx, [bp+2]; bx = 下条指令的偏移地址
+	mov es, [bp+4]; ex = 下条指令的段地址
+	cmp word ptr es:[bx], 21CDh
+	jne skip
+	inc count
+skip:
+	pop es
+	pop bx
+	pop bp
+	iret
+	
+code ends
+end main
+
+利用int 1h进行简单的代码加密
+prev dw offset first ;上一条指令的偏移地址
+
+int1h:
+	push bp
+	push bx
+	push es
+	mov bp, sp; 中断产生的时候, 堆栈里面有返回地址
+	mov bx, [prev]
+	inc byte ptr ds:[bx]
+	mov bx, [bp+2]; bx = 下条指令的偏移地址
+	mov es, [bp+4]; ex = 下条指令的段地址
+	dec byte ptr es:[bx]
+	mov [prev], bx
+	pop es
+	pop bx
+	pop bp
+	iret
+	
+	
+Windows中的int1h单步中断程序设计
+Windows工作在保护模式下,它的中断向量存放在中断描述符表(Interrupt Descriptor Table)中.
+每个中断向量(中断描述符)占8个字节. 4个字节的偏移地址, 2个字节的段地址, 属性. 驱动可以写IDT.
+
+SEH(Structured Exception Handler)结构化异常处理器, SEH是由int1h调用的.
+SEH基本结构
+push offset handler
+push fs:[0]
+mov fs:[0], esp; esp -> old fs:[0] <- fs:[0]; esp+4 -> handler
+
+或:
+.data
+oldfs dd 0
+phandler dd 0
+.code
+mov eax, fs:[0]
+mov oldfs, eax
+mov fs:[0], offset oldfs
+...
+handler:
+
+SEH结构:
+old fs:[0]
+handler
+
+.data
+prev dd offset first
+.code
+assume fs:nothing
+main:
+push offset handler
+push fs:[0]
+mov fs:[0], esp ; 建立SEH结构
+pushfd ; 压入32位的标志寄存器
+pop eax
+or eax, 0100h
+push eax
+popfd ; TF=1
+first:
+nop
+xor eax, eax
+mov ecx, 3
+next:
+add eax,ecx
+loop next
+
+pushfd
+pop eax
+and eax, not 0100h
+push eax
+popfd ; TF = 0
+nop
+ret
+
+handler: ; 注意SEH返回后TF会变回0,这里需要强制改成1
+push ebp
+mov ebp, esp
+push ebx
+mov ebx. [prev]
+inc byte ptr [prev] ; re-encode previous code
+mov ebx, [ebp+8] ; ebp -> old ebp; ebp+4 -> ret address; ebp+8 -> ExceptionRecord
+add ebx, 0ch ; ebx -> 指向发生异常指令的地址的指针
+mov ebx, [ebx]
+dec byte ptr [ebx]
+
+
+或:
+mov ebx, [ebp+10h]
+add ebx, 0b8h ; ebx -> ptr to regEip
+mov ebx, [ebx]
+dec byte ptr [ebx] ; decode next code
+mov [prev], ebx
+cmp byte ptr [ebx], 90h
+je skip
+mov ebx, [ebp+10h]
+or dword ptr [ebx+0c0h], 0100h
+skip:
+pop ebx
+pop ebp
+ret
+
+pop fs:[0]
+add esp, 4
+
+end main
+
+加密时要注意把代码段的属性改成可写 .text的点开始 +20h + 07h 或者 .rdata之前那个字节 最高位表示可写性 代码从400开始,注意用32位模式(QuickView按F2)
+
+一扇区 = 512字节
+
+DOS的EXE文件格式
+首两个字节4D 5A ASCII:'M' 'Z'是EXE文件的标志
+文件头格式：
++00 4D, 5A : EXE标志
++02 28, 00 : 最后那个扇区实际的字节数 (如果为零表示占满)
++04 02, 00 : EXE文件占用的扇区数 = 2 --> 实际占用字节数=200h*2 = 400h --> EXE实际长度 = 228h
++06 01, 00 : 重定位项数
++08 20, 00 : 文件头的节长度 = 20h (文件头的长度 / 10h)
++0A 00, 00 : 需要为EXE分配的最少内存节长度
++0C FF, FF : 需要为EXE分配的最多内存节长度
++0E 00, 00 : [delta] = 0000h, SS=程序载入段地址+[delta]
++10 00, 00 : SP = 0000h
++12 EC, 32 : EXE文件头的校验值(基本没用)
++14 00, 00 : IP = 0000h
++16 01, 00 : [delta] = 0001h, CS=程序载入段地址+[delta]
++18 1E, 00 : 重定位表的具体偏移位置
++1E 01, 00 :
++20 00, 00 :
+
+Windows PE格式
+00 - 3B DOS文件头
++3C C0, 00, 00, 00 : PE头的偏移位置
+PE+00 50, 45 : 'P' 'E' 标志
++06 04, 00 : 该EXE有4个节(section) --> 类似于段(segment) --> .text代码节 .data数据节 .rdata只读数据节 .rsrc资源节
++28 00, 10, 00, 00 : EIP=程序载入地址+1000h --> 大多数程序的载入地址 = 400000h --> 不冲突因为段地址不一样
++34 00, 00, 40, 00 : 程序的载入地址 = 400000h
+(DOS不载入文件头 Windows全部载入)
++78 00, 00, 00, 00 : 输出表的内存相对偏移(该值为delta 要加上程序载入地址 --> 见上)
++7C 00, 00, 00, 00 : 输出表的长度
++80 0C, 20, 00, 00 : 输入表的内存相对偏移
++84 28, 00, 00, 00 : 输入表的长度
++88 00, 40, 00, 00 : 资源表的内存相对偏移(资源 --> 菜单 图标 图形 对话框等)
++8C E8, 00, 00, 00 : 资源表的长度
+
+输出表(export table) : 记录
+DLL中对外可见的API等的名称,入口地址,以便载入DLL文件的程序定位
+输入表(import table) : 记录引用的API等出现的位置,以便重定位
+
+PE+F8 : 第一个节
+节+00 : 节名 --> 共8字节
+节+08 : 48, 00, 00, 00 : 该节的内存长度
+节+0C : 00, 10, 00, 00 : 该节的内存相对偏移
+节+10 : 00, 02, 00, 00 : 该节的文件长度
+节+14 : 00, 04, 00, 00 : 该节的文件偏移
+
+Windows载入程序时分别读取各个节
+
+输入表在.rdata中,可以找出在文件中的位置
+表+0C 5A, 20, 00, 00 : 指向DLL名的内存相对偏移 --> 是一个指针 --> 可以转成文件地址
